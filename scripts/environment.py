@@ -1,13 +1,13 @@
 import gymnasium as gym
 from gymnasium import spaces
 from scripts import *
-import os
+from pathlib import Path
 import numpy as np
 import pygame
 
 from scripts.setting import *
 
-RESOURCES_PATH = "scripts/resources/"
+RESOURCES_PATH = Path(__file__).resolve().parent / "resources"
 SEED = 0
 
 class VacuumWorld(gym.Env):
@@ -77,7 +77,7 @@ class VacuumWorld(gym.Env):
         self.observation_type = observation_type
 
         self.max_step = max_step
-        self.difficulty = max(0, min(difficulty, 3))
+        self.difficulty = difficulty
 
         self.n_obstacles = n_obstacles
         self.n_dirt = n_dirt
@@ -94,9 +94,9 @@ class VacuumWorld(gym.Env):
             # 0 = clean floor
             # 1 = dirt
             # 2 = wall
-            # 3 = vacuum
+            # 3 = vacuum, 3.5 = vacuum on dirt
             self.observation_space = spaces.Box(
-                low=0, high=4, shape=(self.setting.grid_height, self.setting.grid_width), dtype=np.uint8
+                low=0, high=4, shape=(self.setting.grid_height, self.setting.grid_width), dtype=np.float32
             )
 
         self.window = None
@@ -112,6 +112,7 @@ class VacuumWorld(gym.Env):
 
         self.walls = set()
         self.dirts = set()
+        self.water_tiles = set()
 
         self.score = 0
         self.total_step = 0
@@ -137,7 +138,7 @@ class VacuumWorld(gym.Env):
         if self.window is not None or self.canvas is not None:
             return
 
-        font_path = f"{RESOURCES_PATH}font/minecraft/Minecraft.ttf"
+        font_path = RESOURCES_PATH / "font" / "minecraft" / "Minecraft.ttf"
         
         try:
             self.font = pygame.font.Font(font_path, 16)
@@ -171,39 +172,58 @@ class VacuumWorld(gym.Env):
             components = ["cleaner", "dirt", "floor"]
 
             for comp in components:
-                self.sprites[f"component_{comp}"] = load_sp(os.path.join(RESOURCES_PATH, "components", f"{comp}.png"))
+                self.sprites[f"component_{comp}"] = load_sp(RESOURCES_PATH / "components" / f"{comp}.png")
 
             self.sprites_loaded = True
 
     def _generate_map(self):
-        """Generate a random map of the house to clean"""
+        """Generate a random map of the house to clean."""
+
         self.walls = set()
         self.dirts = set()
+        self.water_tiles = set()
 
-        if self.difficulty == 0 or self.difficulty == 1:
-            # Vertical wall dividing the house into two rooms.
+        if self.difficulty == 0 or self.difficulty == 1 or self.difficulty == 2:
             wall_x = self.setting.grid_width // 2
-
-            # Leave one doorway in the middle.
             doorway_y = self.setting.grid_height // 2
 
             for y in range(self.setting.grid_height):
                 if y != doorway_y:
                     self.walls.add((wall_x, y))
 
-            # Walls all around
-            for x in range (self.setting.grid_width):
-                for y in range (self.setting.grid_height):
-                    if x == 0 or x == (self.setting.grid_width - 1) or y == 0 or y == (self.setting.grid_height - 1):
+            for x in range(self.setting.grid_width):
+                for y in range(self.setting.grid_height):
+                    if (
+                        x == 0
+                        or x == self.setting.grid_width - 1
+                        or y == 0
+                        or y == self.setting.grid_height - 1
+                    ):
                         self.walls.add((x, y))
-    
-        elif self.difficulty == 2:
-            pass
-        else:
-            pass
+
+        if self.difficulty >= 2: # water present only in difficulty > of 2
+            valid_cells = [
+                (x, y)
+                for x in range(self.setting.grid_width)
+                for y in range(self.setting.grid_height)
+                if (x, y) not in self.walls
+            ]
+
+            n_water = min(self.setting.n_water, len(valid_cells))
+
+            if n_water > 0:
+                indices = self.np_random.choice(
+                    len(valid_cells),
+                    size=n_water,
+                    replace=False,
+                )
+                self.water_tiles = {
+                    valid_cells[int(i)] for i in np.atleast_1d(indices)
+                }
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self._setup_window()
 
         self.score = 0
         self.total_step = 0
@@ -252,17 +272,26 @@ class VacuumWorld(gym.Env):
             self.floor_background = pygame.Surface((self.setting.width, self.setting.height))
             # render the house layout (without dirts or anything)
             floor_sprite = self.sprites["component_floor"]
-            if floor_sprite is not None:
-                for x in range(self.setting.grid_height):
-                    for y in range(self.setting.grid_width):
-                        position = (x * self.setting.cell_size, y * self.setting.cell_size)
-                        self.floor_background.blit(self.sprites["component_floor"], position)
+            for x in range(self.setting.grid_width):
+                for y in range(self.setting.grid_height):
+                    position = (x * self.setting.cell_size, y * self.setting.cell_size)
+                    if floor_sprite is not None:
+                        self.floor_background.blit(floor_sprite, position)
+                    else:
+                        pygame.draw.rect(self.floor_background, (180, 180, 180), (*position, self.setting.cell_size, self.setting.cell_size))
 
-                        if floor_sprite is not None:
-                            self.floor_background.blit(floor_sprite, position )
+            # Water tiles
+            for x, y in self.water_tiles:
+                position = (
+                    x * self.setting.cell_size,
+                    y * self.setting.cell_size,
+                )
 
-                        else:
-                            pygame.draw.rect(self.floor_background, (180, 180, 180), (*position, self.setting.cell_size, self.setting.cell_size))
+                pygame.draw.rect(
+                    self.floor_background,
+                    (135, 206, 250),  # Light blue
+                    (*position, self.setting.cell_size, self.setting.cell_size),
+                )
 
             for x, y in self.walls:
                 position = (x * self.setting.cell_size, y * self.setting.cell_size)
@@ -270,31 +299,37 @@ class VacuumWorld(gym.Env):
                 pygame.draw.rect(self.floor_background, (20, 20, 20), (*position, self.setting.cell_size, self.setting.cell_size), width=2)   
 
     def _get_obs(self, done = False):
-        if done:
-            return self.death_state()
+        # Terminal observations use the same representation as other states.
         if self.observation_type == ObservationType.IMAGE:
             frame = self._render_frame()
-            if self.render_mode == RenderMode.RGB_ARRAY:
-                # rescale pixels in [0, 1]
-                frame = frame.astype(np.float32) / 255.0
             return frame
         else:
-            # the grid is done such that
-            # 0 stands for clean floor
-            # 1 stands for dirty floor
-            # 2 stands for wall
-            # 3 stands for vacuum cleaner
-            # other numbers will stand for other things
-            grid = np.zeros((self.setting.grid_width, self.setting.grid_height), dtype=np.uint8)
+            grid = np.zeros(
+                (self.setting.grid_height, self.setting.grid_width),
+                dtype=np.float32,
+            )
+
+            # 0 = clean floor
+            # 1 = dirt
+            # 2 = wall
+            # 3 = vacuum
+            # 3.5 = vacuum on dirt
+            # 4 = water
+
+            for x, y in self.water_tiles:
+                grid[y, x] = 4
 
             for x, y in self.dirts:
-                grid[x, y] = 1
+                grid[y, x] = 1
 
             for x, y in self.walls:
-                grid[x, y] = 2
-            
+                grid[y, x] = 2
+
             x, y = self.vacuum
-            grid[x, y] = 3
+            grid[y, x] = 3
+
+            if self.vacuum in self.dirts:
+                grid[y, x] = 3.5
 
             return grid
 
@@ -383,7 +418,10 @@ class VacuumWorld(gym.Env):
             if self.get_possible_actions(action):
                 self.vacuum = new_position
                 self.direction = (dx, dy)
-                reward = -0.1
+                if new_position in self.water_tiles:
+                    reward = -2.0
+                else:
+                    reward = -0.1
 
             else:
                 reward = -3.0
