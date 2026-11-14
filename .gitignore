@@ -45,4 +45,6 @@ Thumbs.db
 *.tmp
 
 # Unpublished setup solution; remove this exact rule when ready to publish.
-notebooks/solutions/2_uninformed_search.ipynb
+
+projects/taxi/submission.py
+projects/taxi/evaluate.py
